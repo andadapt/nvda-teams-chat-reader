@@ -34,6 +34,10 @@ python build.py
 
 The add-on is written to `dist\teamsChatReader.nvda-addon`.
 
+## What's new
+
+See the [changelog](CHANGELOG.md) for what changed in each version.
+
 ## Feedback
 
 Please report problems or ideas on the [issues page](https://github.com/andadapt/nvda-teams-chat-reader/issues).

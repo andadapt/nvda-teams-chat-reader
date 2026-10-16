@@ -220,7 +220,9 @@ def getMessagesFromCachedContainer(pane, count):
 	searched; messages is None when there is no usable container."""
 	global _cachedMessageContainer, _confirmedCompleteContainer
 	container = _cachedMessageContainer
-	if container is None or container.parent is None:
+	# The container must still be inside the current pane: one left over from another chat would read the wrong
+	# messages, and the widening check would climb past the pane to the top of the tree.
+	if container is None or pane not in getAncestors(container, pane):
 		return None, False
 	start = time.perf_counter()
 	widened = False
@@ -303,6 +305,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
 	# The message the last press read, so a second press can copy it without searching again.
 	_lastMessage = None
+	# The key of the last press. NVDA counts any quick repeat of this script as a double press, even with a
+	# different number key, so a copy only happens when the same key was pressed twice.
+	_lastKey = None
 
 	def _readMessage(self, position):
 		self._lastMessage = None
@@ -343,8 +348,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		gestures=["kb:alt+{}".format(n) for n in "1234567890"],
 	)
 	def script_readRecentMessage(self, gesture):
-		if getLastScriptRepeatCount() == 1:
+		key = gesture.mainKeyName
+		if getLastScriptRepeatCount() == 1 and key == self._lastKey:
 			self._copyLastMessage()
 			return
-		key = gesture.mainKeyName
+		self._lastKey = key
 		self._readMessage(10 if key == "0" else int(key))
