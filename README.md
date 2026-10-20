@@ -17,6 +17,8 @@ These work while Microsoft Teams is the active window. In other programs the key
 - Alt+0: read the tenth most recent message.
 - Press any of these twice quickly to copy that message's text to the clipboard.
 
+- Control+Alt+L: in the calendar, list the events in the view that is open, such as this work week. Each day is its own section with the number of events, and below it each event's time, title and organiser. Arrow up and down to move through the list, press Enter to go to that event in the calendar, or Escape to close the list.
+
 You can change these keys in NVDA's Input Gestures dialog, under the "Teams Chat Reader" category.
 
 ## Debugging commands

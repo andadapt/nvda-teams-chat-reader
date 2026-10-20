@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 dist/
 *.nvda-addon
+# NVDA logs captured for debugging; they contain chat and calendar content
+debug*.txt

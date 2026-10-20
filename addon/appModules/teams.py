@@ -1,14 +1,18 @@
 # Teams Chat Reader
 # Alt+1 reads the most recent message in the open Teams chat, Alt+2 the one before, up to Alt+0 for the tenth.
 # Pressing the same key twice quickly copies that message to the clipboard.
+# Control+Alt+L lists the events in the open calendar view, grouped by day.
 # NVDA loads this module for classic Teams (teams.exe) by name; the global plugin maps new Teams (ms-teams.exe) to it.
 # Teams draws its interface in Edge WebView2, and NVDA gives that content the app module of the process hosting it.
 
+import re
 import time
 
 import api
 import controlTypes
+import gui
 import ui
+import wx
 from logHandler import log
 from nvdaBuiltin.appModules.teams import AppModule as BuiltinTeamsAppModule
 from scriptHandler import getLastScriptRepeatCount, script
@@ -306,6 +310,174 @@ def getMessageText(message):
 	return message.name or getMessageContent(message) or getVisibleText(message)
 
 
+# Calendar: Teams shows the Outlook web calendar in a frame. Each event is a button labelled with everything about it,
+# for example "Knowledge transfer, 10:00 to 11:00, Thursday, October 22, 2026, Microsoft Teams Meeting, By Wilson,
+# Derren (DSIT), Busy". The labels are in the Teams language; only English ones are split up.
+
+# HTML id of the region holding the calendar grid.
+CALENDAR_VIEW_ID = "Jump to calendar view-region"
+# Empty time slots are buttons too; their ids start with this.
+CALENDAR_SLOT_ID_PREFIX = "selectedInterval_"
+
+_WEEKDAYS = "Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday"
+_TIME = r"\d{1,2}[:.]\d{2}(?:\s?[AaPp]\.?[Mm]\.?)?"
+_EVENT_WITH_TIME = re.compile(
+	r"^(?P<title>.*?), (?P<start>" + _TIME + r") to (?P<end>" + _TIME + r"), "
+	r"(?P<day>" + _WEEKDAYS + r"), (?P<date>.+?\d{4})(?:, (?P<rest>.*))?$"
+)
+# Events without a time, such as all-day ones, have some other wording where the time would be.
+_EVENT_WITHOUT_TIME = re.compile(
+	r"^(?P<title>.*?), (?P<when>[^,]+), (?P<day>" + _WEEKDAYS + r"), (?P<date>.+?\d{4})(?:, (?P<rest>.*))?$"
+)
+_ORGANISER = re.compile(r"(?:^|, )By (?P<organiser>.+?)(?:, (?:Busy|Tentative|Free|Away|Out of office|Working elsewhere)\b|$)")
+
+
+class CalendarEvent:
+
+	def __init__(self, obj, label):
+		self.obj = obj
+		self.day = None
+		self.time = ""
+		self.title = label
+		self.organiser = ""
+		self.sortKey = 0
+		match = _EVENT_WITH_TIME.match(label)
+		if match:
+			self.time = "{} to {}".format(match.group("start"), match.group("end"))
+			self.sortKey = minutesFromTime(match.group("start"))
+		else:
+			match = _EVENT_WITHOUT_TIME.match(label)
+			if match:
+				self.time = match.group("when")
+				# Events without a time come first in their day.
+				self.sortKey = -1
+		if match:
+			self.day = "{}, {}".format(match.group("day"), match.group("date"))
+			self.title = match.group("title").strip()
+			organiser = _ORGANISER.search(match.group("rest") or "")
+			if organiser:
+				self.organiser = organiser.group("organiser")
+
+	def describe(self):
+		return ", ".join(part for part in (self.time, self.title, self.organiser) if part)
+
+
+def minutesFromTime(text):
+	match = re.match(r"(\d{1,2})[:.](\d{2})\s?([AaPp])?", text)
+	if not match:
+		return 0
+	hours = int(match.group(1))
+	if match.group(3):
+		hours = hours % 12 + (12 if match.group(3).lower() == "p" else 0)
+	return hours * 60 + int(match.group(2))
+
+
+def isCalendarView(obj):
+	return obj.role == controlTypes.Role.LANDMARK and getHtmlId(obj) == CALENDAR_VIEW_ID
+
+
+def getCalendarView():
+	obj = api.getFocusObject()
+	while obj:
+		if isCalendarView(obj):
+			return obj
+		obj = obj.parent
+	# Focus is elsewhere, such as on the Calendar button in the Teams app bar, so search the window.
+	fg = api.getForegroundObject()
+	if fg:
+		return findDescendant(fg, isCalendarView, skip=lambda o: o.role in _PANE_SEARCH_SKIP_ROLES)
+	return None
+
+
+def getCalendarDays():
+	"""The events in the calendar view as a list of (day, events), in the order the calendar shows the days.
+	Returns None when no calendar is open."""
+	view = getCalendarView()
+	if not view:
+		return None
+	buttons = []
+
+	def collect(obj):
+		if obj.role == controlTypes.Role.BUTTON and obj.name and not getHtmlId(obj).startswith(CALENDAR_SLOT_ID_PREFIX):
+			buttons.append(obj)
+		return False
+
+	findDescendant(view, collect, skip=lambda o: o.role == controlTypes.Role.BUTTON)
+	days = {}
+	for obj in buttons:
+		event = CalendarEvent(obj, obj.name)
+		# Buttons without a day, such as "Add work location", aren't events.
+		if event.day:
+			days.setdefault(event.day, []).append(event)
+	for events in days.values():
+		events.sort(key=lambda event: event.sortKey)
+	return list(days.items())
+
+
+class CalendarDialog(wx.Dialog):
+	"""The calendar's events in a tree: each day, with its events below it."""
+
+	_instance = None
+
+	def __init__(self, parent, days):
+		super().__init__(parent, title="Calendar events")
+		sizer = wx.BoxSizer(wx.VERTICAL)
+		self.tree = wx.TreeCtrl(self, size=(500, 400), style=wx.TR_HAS_BUTTONS | wx.TR_HIDE_ROOT | wx.TR_LINES_AT_ROOT)
+		root = self.tree.AddRoot("Calendar")
+		today = time.strftime("%A")
+		firstItem = todayItem = None
+		for day, events in days:
+			label = "{}, {} {}".format(day, len(events), "event" if len(events) == 1 else "events")
+			dayItem = self.tree.AppendItem(root, label)
+			for event in events:
+				self.tree.AppendItem(dayItem, event.describe(), data=event)
+			self.tree.Expand(dayItem)
+			firstItem = firstItem or dayItem
+			if todayItem is None and day.startswith(today):
+				todayItem = dayItem
+		if todayItem or firstItem:
+			self.tree.SelectItem(todayItem or firstItem)
+		self.tree.Bind(wx.EVT_TREE_ITEM_ACTIVATED, self.onActivate)
+		sizer.Add(self.tree, proportion=1, flag=wx.EXPAND | wx.ALL, border=8)
+		closeButton = wx.Button(self, wx.ID_CLOSE)
+		closeButton.Bind(wx.EVT_BUTTON, lambda evt: self.Close())
+		sizer.Add(closeButton, flag=wx.ALIGN_RIGHT | wx.ALL, border=8)
+		self.SetEscapeId(wx.ID_CLOSE)
+		self.Bind(wx.EVT_CLOSE, self.onClose)
+		self.SetSizerAndFit(sizer)
+
+	def onActivate(self, evt):
+		"""Enter on an event closes the list and moves to that event in Teams."""
+		event = self.tree.GetItemData(evt.GetItem())
+		if event is None:
+			evt.Skip()
+			return
+		self.Close()
+		# Give Teams a moment to take focus back before moving it to the event.
+		wx.CallLater(200, focusCalendarEvent, event.obj)
+
+	def onClose(self, evt):
+		CalendarDialog._instance = None
+		self.Destroy()
+
+	@classmethod
+	def show(cls, days):
+		if cls._instance:
+			cls._instance.Destroy()
+		gui.mainFrame.prePopup()
+		cls._instance = cls(gui.mainFrame, days)
+		cls._instance.Show()
+		cls._instance.tree.SetFocus()
+		gui.mainFrame.postPopup()
+
+
+def focusCalendarEvent(obj):
+	try:
+		obj.setFocus()
+	except Exception:
+		log.debugWarning("Teams Chat Reader: could not move to calendar event", exc_info=True)
+
+
 # Debug capture: writes what NVDA sees of Teams to the NVDA log, to work out how to find things such as
 # calendar events. The capture includes chat and calendar text, so it should be checked before it is shared.
 
@@ -466,6 +638,25 @@ class AppModule(BuiltinTeamsAppModule):
 			return
 		self._lastKey = key
 		self._readMessage(10 if key == "0" else int(key))
+
+	@script(
+		description="Teams: list the events in the open calendar view, grouped by day",
+		gesture="kb:control+alt+l",
+	)
+	def script_listCalendarEvents(self, gesture):
+		try:
+			days = getCalendarDays()
+		except Exception:
+			log.error("Teams Chat Reader: failed to read the calendar", exc_info=True)
+			ui.message("Could not read the calendar")
+			return
+		if days is None:
+			ui.message("No calendar open")
+			return
+		if not days:
+			ui.message("No events in this calendar view")
+			return
+		wx.CallAfter(CalendarDialog.show, days)
 
 	@script(
 		description=(

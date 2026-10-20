@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.0
+
+- Control+Alt+L lists the events in the open Teams calendar view. Each day is its own section, and each event shows its time, title and organiser. Use the arrow keys to move through the list, Enter to go to an event in the calendar, and Escape to close the list.
+- Event details are read from the calendar's English labels, so in other languages an event may appear with its full label instead.
+
 ## 0.3.1
 
 - Messages can be read again after leaving a chat for another part of Teams, such as Activity, and coming back. Before, the add-on kept looking in the chat Teams had thrown away and found nothing.
