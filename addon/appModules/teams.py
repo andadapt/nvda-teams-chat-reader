@@ -22,11 +22,12 @@ MESSAGE_CONTENT_PREFIX = "content-"
 MAX_SEARCH_NODES = 5000
 
 
-def getHtmlId(obj):
+def getHtmlId(obj, useCache=True):
 	"""The HTML id of a web element, whether NVDA reaches it through IAccessible2 or UI Automation.
-	Each lookup is a call into the Teams process, so the result is remembered on the object."""
+	Each lookup is a call into the Teams process, so the result is remembered on the object.
+	Pass useCache=False to ask Teams again, which gives an empty id once the element has been removed."""
 	cached = getattr(obj, "_teamsChatReaderHtmlId", None)
-	if cached is not None:
+	if useCache and cached is not None:
 		return cached
 	htmlId = ""
 	try:
@@ -110,8 +111,9 @@ _MESSAGE_SEARCH_SKIP_ROLES = (
 
 
 def isPaneAlive(pane):
+	# The id is read afresh: the remembered one still matches after Teams has removed the pane.
 	try:
-		return pane.parent is not None and getHtmlId(pane) == MESSAGE_PANE_ID
+		return pane.parent is not None and getHtmlId(pane, useCache=False) == MESSAGE_PANE_ID
 	except Exception:
 		return False
 
@@ -235,8 +237,27 @@ def getMessagesFromCachedContainer(pane, count):
 	return messages, trusted
 
 
+def forgetCachedObjects():
+	global _cachedPane, _cachedMessageContainer, _confirmedCompleteContainer
+	_cachedPane = None
+	_cachedMessageContainer = None
+	_confirmedCompleteContainer = None
+
+
 def getRecentMessages(count):
 	"""Up to count message objects, most recent first."""
+	usedCachedPane = _cachedPane is not None
+	messages = searchRecentMessages(count)
+	# Teams rebuilds the chat after a visit to another view such as Activity, and the old elements can still
+	# look alive. If the remembered ones gave nothing, forget them and search again from scratch.
+	if not messages and usedCachedPane:
+		log.debug("Teams Chat Reader: no messages from remembered pane, searching again")
+		forgetCachedObjects()
+		messages = searchRecentMessages(count)
+	return messages
+
+
+def searchRecentMessages(count):
 	global _cachedMessageContainer, _confirmedCompleteContainer
 	start = time.perf_counter()
 	pane = getMessagePane()
@@ -285,6 +306,101 @@ def getMessageText(message):
 	return message.name or getMessageContent(message) or getVisibleText(message)
 
 
+# Debug capture: writes what NVDA sees of Teams to the NVDA log, to work out how to find things such as
+# calendar events. The capture includes chat and calendar text, so it should be checked before it is shared.
+
+# A full capture can freeze NVDA for a few seconds; this keeps it bounded.
+MAX_CAPTURE_NODES = 4000
+MAX_CAPTURE_TEXT = 300
+
+
+def describeForCapture(obj):
+	"""One line about an element: what it is, what it says and the HTML details that help find it again."""
+	parts = []
+
+	def add(label, getValue):
+		try:
+			value = getValue()
+		except Exception:
+			return
+		if value:
+			text = str(value).replace("\n", " ")
+			if len(text) > MAX_CAPTURE_TEXT:
+				text = text[:MAX_CAPTURE_TEXT] + "..."
+			parts.append("{}={!r}".format(label, text))
+
+	add("role", lambda: obj.role.name.lower())
+	add("name", lambda: obj.name)
+	add("value", lambda: obj.value)
+	add("description", lambda: obj.description)
+	add("id", lambda: getHtmlId(obj))
+	add("states", lambda: ",".join(sorted(state.name.lower() for state in obj.states)))
+	add("attributes", lambda: ";".join(
+		"{}:{}".format(key, value) for key, value in sorted(obj.IA2Attributes.items()) if key != "id"))
+	return " ".join(parts) or "(unreadable element)"
+
+
+def describeAncestorPath(obj):
+	"""The roles and ids from the document down to obj's parent, for example document > region#chat > list."""
+	path = []
+	try:
+		obj = obj.parent
+		while obj and len(path) < 100:
+			step = obj.role.name.lower()
+			htmlId = getHtmlId(obj)
+			if htmlId:
+				step += "#" + htmlId
+			path.append(step)
+			if obj.role == controlTypes.Role.DOCUMENT:
+				break
+			obj = obj.parent
+	except Exception:
+		path.append("(unreadable)")
+	return " > ".join(reversed(path))
+
+
+def captureFocusAncestry(obj):
+	lines = []
+	while obj and len(lines) < 100:
+		lines.append(describeForCapture(obj))
+		try:
+			obj = obj.parent
+		except Exception:
+			lines.append("(parent unreadable)")
+			break
+	return lines
+
+
+def captureTree(root):
+	"""Every element below root, indented by depth, in document order."""
+	lines = []
+	stack = [(root, 0)]
+	while stack and len(lines) < MAX_CAPTURE_NODES:
+		obj, depth = stack.pop()
+		lines.append("  " * depth + describeForCapture(obj))
+		kids = []
+		try:
+			child = obj.firstChild
+			while child:
+				kids.append(child)
+				child = child.next
+		except Exception:
+			lines.append("  " * (depth + 1) + "(children unreadable)")
+		stack.extend((kid, depth + 1) for kid in reversed(kids))
+	if stack:
+		lines.append("... stopped after {} elements".format(MAX_CAPTURE_NODES))
+	return lines
+
+
+def describeCachedObjects():
+	if _cachedPane is None:
+		pane = "none"
+	else:
+		pane = "alive" if isPaneAlive(_cachedPane) else "removed"
+	return "Remembered message pane: {}, remembered message container: {}".format(
+		pane, "none" if _cachedMessageContainer is None else "set")
+
+
 # Builds on NVDA's own Teams support, which stops message menus from taking focus.
 class AppModule(BuiltinTeamsAppModule):
 
@@ -295,6 +411,16 @@ class AppModule(BuiltinTeamsAppModule):
 	# The key of the last press. NVDA counts any quick repeat of this script as a double press, even with a
 	# different number key, so a copy only happens when the same key was pressed twice.
 	_lastKey = None
+	# Turned on by the debug command; every focus change in Teams is then written to the log.
+	_logFocus = False
+
+	def event_gainFocus(self, obj, nextHandler):
+		if self._logFocus:
+			try:
+				log.info("Teams Chat Reader focus: {}\n  in {}".format(describeForCapture(obj), describeAncestorPath(obj)))
+			except Exception:
+				log.error("Teams Chat Reader: failed to log focus", exc_info=True)
+		nextHandler()
 
 	def _readMessage(self, position):
 		self._lastMessage = None
@@ -340,3 +466,38 @@ class AppModule(BuiltinTeamsAppModule):
 			return
 		self._lastKey = key
 		self._readMessage(10 if key == "0" else int(key))
+
+	@script(
+		description=(
+			"Teams Chat Reader debugging: write the focus and everything on the Teams page to the NVDA log. "
+			"The capture includes chat and calendar text"
+		),
+		gesture="kb:NVDA+alt+shift+d",
+	)
+	def script_captureForDebugging(self, gesture):
+		ui.message("Capturing")
+		start = time.perf_counter()
+		lines = ["Teams Chat Reader capture", describeCachedObjects(), "Focus and its ancestors, nearest first:"]
+		focus = api.getFocusObject()
+		lines.extend("  " + line for line in captureFocusAncestry(focus))
+		doc = getTeamsDocument()
+		if doc:
+			lines.append("Page:")
+			pageLines = captureTree(doc)
+			lines.extend(pageLines)
+		else:
+			lines.append("No Teams page found")
+			pageLines = []
+		log.info("\n".join(lines))
+		ui.message("Captured {} elements in {:.0f} seconds".format(len(pageLines), time.perf_counter() - start))
+
+	@script(
+		description=(
+			"Teams Chat Reader debugging: turn on or off writing every focus change in Teams to the NVDA log. "
+			"The log then includes the text of whatever you move to"
+		),
+		gesture="kb:NVDA+alt+shift+f",
+	)
+	def script_toggleFocusLogging(self, gesture):
+		AppModule._logFocus = not AppModule._logFocus
+		ui.message("Focus logging on" if AppModule._logFocus else "Focus logging off")

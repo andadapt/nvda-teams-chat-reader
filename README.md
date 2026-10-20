@@ -19,6 +19,15 @@ These work while Microsoft Teams is the active window. In other programs the key
 
 You can change these keys in NVDA's Input Gestures dialog, under the "Teams Chat Reader" category.
 
+## Debugging commands
+
+These help when reporting a problem. They write to the NVDA log, which you can open from the NVDA menu under Tools, View log.
+
+- NVDA+Alt+Shift+D: capture what NVDA sees of the Teams window: the focused element, everything around it, and up to 4000 elements of the page. NVDA may be silent for a few seconds while it works and says how many elements it captured.
+- NVDA+Alt+Shift+F: turn focus logging on or off. While it is on, every element you move to in Teams is written to the log, with where it sits on the page. It turns off again when NVDA restarts.
+
+The log then contains the text of your chats, calendar events and anything else on screen. Read it and remove anything private before you share it.
+
 ## Requirements
 
 - NVDA 2024.1 or later.

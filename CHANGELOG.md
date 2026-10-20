@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1
+
+- Messages can be read again after leaving a chat for another part of Teams, such as Activity, and coming back. Before, the add-on kept looking in the chat Teams had thrown away and found nothing.
+- Two debugging commands for reporting problems and for working out how to read the Teams calendar: NVDA+Alt+Shift+D writes everything on the Teams page to the NVDA log, and NVDA+Alt+Shift+F turns on or off logging of every focus change. See the README before sharing a log, as it contains your chat and calendar text.
+
 ## 0.3.0
 
 - The commands now live in an app module for Teams, the standard NVDA way for app-specific add-ons. NVDA only offers them while Teams has focus, so the add-on no longer checks the foreground window on every key press.
